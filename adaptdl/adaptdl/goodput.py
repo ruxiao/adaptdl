@@ -19,6 +19,16 @@ import collections
 import scipy.optimize
 import scipy.stats
 
+# START: Heterogeneous Hardware Performance Modeling
+# START: 异构硬件性能建模
+# ---------------------------------------------------
+#
+# 以下 PerfParams 定义了一个精细的性能模型，用于预测分布式训练中每一步的时间。
+# 这个模型是实现异构计算的核心，因为它没有使用固定的性能假设，
+# 而是为不同类型的硬件交互（节点内 vs. 节点间）定义了不同的参数。
+# 这些参数最终会通过在线学习（见 fit_perf_params 函数）从真实硬件中获得，
+# 从而使系统能够自适应各种异构GPU和网络环境。
+#
 # Parameters for a performance model which predicts the per-step time of
 # distributed SGD using all-reduce. At a high level, models compute time and
 # network time separately, and combines them with some degree of overlap.
@@ -31,26 +41,37 @@ import scipy.stats
 PerfParams = collections.namedtuple("PerfParams", [
     # T_compute ~ alpha_c + beta_c * local_bsz +
     #             (alpha_a + beta_a * local_bsz) * accumulation_steps
-    "alpha_c",  # Constant term of compute time
-    "beta_c",   # Multiplicative factor of compute time
+    "alpha_c",  # 计算时间的常数项 (Constant term of compute time)
+    "beta_c",   # 计算时间随本地批大小变化的系数 (Multiplicative factor of compute time)
     # If inter-node: T_network ~ alpha_n + beta_n * replicas
-    "alpha_n",  # Constant term of inter-node network time
-    "beta_n",   # Retrogression factor of inter-node network time
+    "alpha_n",  # [异构关键点] 节点间网络时间的常数项 (Constant term of inter-node network time)
+    "beta_n",   # [异构关键点] 节点间网络时间的衰减系数 (Retrogression factor of inter-node network time)
     # If intra-node: T_network ~ alpha_r + beta_r * replicas
-    "alpha_r",  # Constant term of intra-node network time
-    "beta_r",   # Retrogression factor of intra-node network time
+    "alpha_r",  # [异构关键点] 节点内网络时间的常数项 (Constant term of intra-node network time)
+    "beta_r",   # [异构关键点] 节点内网络时间的衰减系数 (Retrogression factor of intra-node network time)
     # T_step ~ (T_compute ^ gamma + T_network ^ gamma) ^ (1 / gamma)
     # Essentially is a p-norm where p = gamma. When p ~ 1 then
     # T_step ~ T_compute + T_network, indicating no overlap between compute
     # and network. When p -> infinity then T_step = max(T_compute, T_network),
     # indicating perfect overlap. We limit gamma to [1, 10] since 10 is close
     # enough to approximate the max function for our purposes.
-    "gamma",    # Models the degree of overlap between compute and network
+    "gamma",    # 建模计算与网络重叠程度的参数 (Models the degree of overlap between compute and network)
 ])
+# -------------------------------------------------
+# END: Heterogeneous Hardware Performance Modeling
+# END: 异构硬件性能建模
+#
 
 GradParams = collections.namedtuple("GradParams", ["sqr", "var"])
 
 
+# START: Goodput Algorithm Implementation
+# START: Goodput 算法实现
+# ---------------------------------------
+#
+# GoodputFunction 类是整个“有效吞吐量”优化算法的核心。
+# 它将硬件性能（Throughput）和算法收敛效率（Statistical Efficiency）结合起来，
+# 寻找到一个既快又好的最佳训练配置。
 class GoodputFunction(object):
 
     def __init__(self, perf_params, grad_params, init_batch_size):
@@ -62,12 +83,20 @@ class GoodputFunction(object):
         return self.evaluate(num_nodes, num_replicas, atomic_bsz, accum_steps)
 
     def evaluate(self, num_nodes, num_replicas, atomic_bsz, accum_steps):
+        """
+        [算法核心] 此函数计算“有效吞吐量”（Goodput）。
+        公式为: Goodput = Throughput * Statistical Efficiency
+        它结合了硬件速度和算法收敛性，是最终的优化目标。
+        """
         batch_size = num_replicas * atomic_bsz * (accum_steps + 1)
         assert np.all(self._init_batch_size <= batch_size)
         return self.throughput(num_nodes, num_replicas, atomic_bsz,
                                accum_steps) * self.efficiency(batch_size)
 
     def throughput(self, num_nodes, num_replicas, atomic_bsz, accum_steps):
+        """
+        此函数使用上面定义的 PerfParams 模型来预测纯粹的硬件吞吐量（每秒处理的样本数）。
+        """
         accum_time = _predict_accum_time(self._perf_params, atomic_bsz)
         network_time = _predict_network_time(self._perf_params,
                                              num_nodes, num_replicas)
@@ -78,6 +107,12 @@ class GoodputFunction(object):
         return batch_size / total_time
 
     def efficiency(self, batch_size):
+        """
+        [算法核心] 此函数计算“统计效率”，用于保证算法的收敛稳定性。
+        当批处理大小（batch_size）增加时，硬件吞吐量会提高，但梯度更新的有效性可能会下降。
+        这个函数通过梯度统计（梯度方差和平方均值）来量化这种下降，
+        从而惩罚那些过大的、可能导致收敛变差的批处理大小。
+        """
         grad_sqr = self._grad_params.sqr
         grad_var = self._grad_params.var
         scale = batch_size / self._init_batch_size
@@ -87,6 +122,12 @@ class GoodputFunction(object):
 
     def optimize(self, num_nodes, num_replicas, max_batch_size=None,
                  atomic_bsz_range=None, accumulation=False):
+        """
+        [算法核心] 这是优化器函数。
+        它在给定的硬件资源（节点数、副本数）和约束（如max_batch_size）下，
+        搜索能够最大化 evaluate() 函数返回的“有效吞吐量”（Goodput）的
+        批处理大小（atomic_bsz）和梯度累积步数（accum_steps）组合。
+        """
         assert np.all(np.less_equal(1, num_nodes))
         assert np.all(np.less_equal(num_nodes, num_replicas))
         if max_batch_size is None:
@@ -132,10 +173,10 @@ class GoodputFunction(object):
         atomic_bsz = np.maximum(min_atomic_bsz, atomic_bsz)
         atomic_bsz = np.minimum(max_atomic_bsz, atomic_bsz)
 
-        # Evaluate the goodput of all candidate configurations.
+        # 关键步骤：对所有候选配置评估其 goodput
         goodput = self.evaluate(num_nodes, num_replicas,
                                 atomic_bsz, accum_steps)
-        # Find the indices of the best configurations.
+        # 找到 goodput 最高的配置
         indices = np.argmax(goodput, axis=0), np.arange(goodput.shape[1])
         # Restore the correct output shape and return results.
         goodput = goodput[indices].reshape(output_shape)
@@ -146,13 +187,26 @@ class GoodputFunction(object):
             atomic_bsz = atomic_bsz.item()
             accum_steps = accum_steps.item()
         return goodput, atomic_bsz, accum_steps
+# -------------------------------------
+# END: Goodput Algorithm Implementation
+# END: Goodput 算法实现
+#
 
 
+# START: Online Performance Fitting
+# START: 在线性能拟合
+# ----------------------------------
+#
 def fit_perf_params(num_nodes, num_replicas, atomic_bsz,
                     accum_step_time, optim_step_time):
-    # Fit the performance model given accum time and optim time measurements
-    # for different configurations of num_nodes, num_replicas, and atomic_bsz.
-
+    """
+    [算法核心] 这是整个系统自适应能力的关键：在线拟合。
+    它不依赖于离线的、预设的模拟器。相反，它在训练过程中收集真实的性能数据
+    (例如 accum_step_time, optim_step_time)，然后调用一个数值优化器
+    (scipy.optimize.minimize) 来反向推算出最能匹配这些真实数据的
+    PerfParams 模型参数。
+    这使得系统能够“学习”到当前异构硬件的真实性能，并做出最优决策。
+    """
     # HACK: We want to use the original numpy module for calls from the
     # SpeedupFunction for performance reasons, but also need those functions to
     # use autograd.numpy when we want to differentiate them. We patch the
@@ -206,6 +260,8 @@ def fit_perf_params(num_nodes, num_replicas, atomic_bsz,
         params[3] = max(params[3], params[5] * 1.1)
     np = orig_np  # Restore original numpy.
     return PerfParams(*params)
+
+
 
 
 def _rmse(pred, true):
