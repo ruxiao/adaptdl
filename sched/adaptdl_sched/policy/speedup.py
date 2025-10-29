@@ -89,6 +89,11 @@ class SpeedupFunction(object):
 
             # 2. [Core Logic] Calculate speedup by normalizing with the base_goodput.
             #    [核心逻辑] 通过与基准 goodput 相除来计算加速比，实现标准化。
+            # SELF-AWARE: 这是连接底层模型和上层调度的“适配器”。它将GoodputFunction封装起来，
+            # 对外提供一个更简洁的接口。调度器不关心具体的 Goodput 数值，
+            # 而是关心“加速比”——即“给一个任务分配N个GPU，其运行速度会是分配1个GPU时的多少倍？”。
+            # SpeedupFunction通过计算不同GPU数量下的最大Goodput并与单GPU时的基准值相除，
+            # 来回答这个问题，从而为全局资源分配提供标准化的决策依据。
             calculated_speedup = goodput / self._base_goodput
 
             # Memoize results.

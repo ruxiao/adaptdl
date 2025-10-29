@@ -528,6 +528,9 @@ class AdaptiveDataLoader(DataLoader, AdaptiveDataLoaderMixin):
                     epoch, index=self._elastic.current_index)
                 self.batch_sampler.batch_size = self._elastic._sync_local_bsz()
                 for idx, batch in enumerate(super().__iter__()):
+                    # SELF-AWARE: 在用户的训练循环中，AdaptiveDataLoader通过上下文管理器
+                    # a. 精确测量每一步（Step）包含计算和通信的总时间
+                    # b. 记录当前使用的本地批次大小
                     with self._elastic.profile(self.training and idx >= 1):
                         yield batch
                         # Increment by the number of data samples processed

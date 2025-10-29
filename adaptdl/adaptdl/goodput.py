@@ -99,6 +99,10 @@ class GoodputFunction(object):
         """
         batch_size = num_replicas * atomic_bsz * (accum_steps + 1)
         assert np.all(self._init_batch_size <= batch_size)
+        # SELF-AWARE: 这是系统的“决策大脑”。它接收第二步中新鲜出炉的性能模型 (PerfParams)
+        # 和梯度统计模型 (GradParams)。其核心是Goodput = Throughput × Statistical Efficiency公式，
+        # 它将硬件的原始速度（Throughput）与增大批次可能带来的收敛性损失（Efficiency）相权衡，
+        # 计算出一个综合了“速度”和“效果”的“有效吞吐量”指标。
         return self.throughput(num_nodes, num_replicas, atomic_bsz,
                                accum_steps) * self.efficiency(batch_size)
 
@@ -195,6 +199,8 @@ class GoodputFunction(object):
         # Key step: evaluate the goodput of all candidate configurations.
         goodput = self.evaluate(num_nodes, num_replicas,
                                 atomic_bsz, accum_steps)
+        # SELF-AWARE: 对于一个给定的硬件配置，
+        # 它能优化并找出最大化此指标的最佳本地批次大小。
         # Find the indices of the best configurations.
         indices = np.argmax(goodput, axis=0), np.arange(goodput.shape[1])
         # Restore the correct output shape and return results.

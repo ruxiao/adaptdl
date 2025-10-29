@@ -47,6 +47,8 @@ def profile_step_commit(accumulation_step=False):
     num_nodes = adaptdl.env.num_nodes()
     num_replicas = adaptdl.env.num_replicas()
     key = (num_nodes, num_replicas, state.atomic_bsz)
+    # SELF-AWARE: 此模块是系统的“数据中心”和“模型工厂”。
+    # a. 它定期（如每30秒）汇总所有训练副本（Replica）采集到的原始性能数据点。
     if accumulation_step:
         state.profile[key]["accum_step_time"] += step_time
         state.profile[key]["accum_count"] += 1
@@ -61,7 +63,10 @@ def profile_step_commit(accumulation_step=False):
         if _PREV_REPORT is None:
             _PREV_REPORT = time.time()
         if adaptdl.env.replica_rank() == 0 and time.time() - _PREV_REPORT > 30:
+            # SELF-AWARE: b. 然后，它调用底层的fit_perf_params函数，通过数值优化方法，
+            # 将这些离散的数据点在线拟合成一个能精确描述当前异构硬件性能的连续数学模型（PerfParams）。
             _fit_perf_params()
+            # SELF-AWARE: c. 拟合出的模型参数和最新的梯度统计数据会被打包成“调度提示”（Scheduling Hints）汇报给上层调度器。
             _report_sched_hints()
             _PREV_REPORT = time.time()
 

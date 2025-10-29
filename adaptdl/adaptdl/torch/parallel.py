@@ -102,6 +102,8 @@ class AdaptiveDataParallel(DistributedDataParallel):
 
     @adaptdl.utils.print_exc
     def _backward_hook(self, param, grad):
+        # SELF-AWARE: 通过巧妙的 backward hook 机制，
+        # a. 分离并测量出纯粹由梯度同步（AllReduce）产生的通信时间
         # This method should be invoked once for each parameter during the
         # backward pass, before gradients are synchronized between replicas.
         if grad.device.type.startswith("cuda"):
@@ -159,6 +161,8 @@ class AdaptiveDataParallel(DistributedDataParallel):
         update_progress(self.gns.get_progress())
         if dataloader.max_batch_size and \
                 dataloader.max_batch_size > dataloader.batch_size:
+            # SELF-AWARE: 通过巧妙的 backward hook 机制，
+            # b. 并计算出保证收敛性所需的梯度统计信息（梯度平方均值和梯度方差）
             update_grad_params(self._key, self.gns.sqr_avg(),
                                self.gns.var_avg())
         self._sync_start = None

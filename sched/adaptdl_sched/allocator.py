@@ -144,6 +144,7 @@ class AdaptDLAllocator(object):
             if list(job_allocation) != new_allocation:
                 patch = {"status": {"allocation": new_allocation}}
                 LOG.info("Patch AdaptDLJob %s/%s: %s", namespace, name, patch)
+                # SELF-AWARE: d. 该方案会被写回Kubernetes，触发任务的扩容或缩容，完成整个自适应闭环。
                 await patch_job_status(self._objs_api, namespace, name, patch)
 
     async def _find_nodes(self, pod_label_selector=""):
@@ -190,6 +191,8 @@ class AdaptDLAllocator(object):
         # max_replicas should be greater or equal to min_replicas
         max_replicas = max(max_replicas, min_replicas)
         preemptible = job["spec"].get("preemptible", True)
+        # SELF-AWARE: 这是最高层的决策执行者。
+        # a. 调度器从所有正在运行的任务处收集它们汇报的“调度提示”
         if {"perfParams", "initBatchSize"} <= hints.keys() and preemptible:
             max_batch_size = (hints.get("maxBatchSize")
                               or hints["initBatchSize"])
@@ -207,6 +210,7 @@ class AdaptDLAllocator(object):
                 grad_params = GradParams(0.0, 1.0)
             goodput_fn = GoodputFunction(perf_params, grad_params,
                                          hints["initBatchSize"])
+            # SELF-AWARE: b. 并为每个任务在调度器端重建出其专属的SpeedupFunction。
             speedup_fn = SpeedupFunction(
                 goodput_fn,
                 hints.get("maxBatchSize"),
@@ -261,6 +265,8 @@ class AdaptDLAllocator(object):
             # There are no jobs, let the expander shrink the cluster.
             self._cluster_expander.fit([])
         elif jobs and nodes:
+            # SELF-AWARE: c. 然后，调度策略（如 Pollux）会利用这些加速比函数进行模拟和推演，
+            # 求解一个全局优化问题，最终得出一个能最大化整个集群吞吐量或公平性的资源分配方案。
             allocations, desired_nodes = self._policy.optimize(
                 jobs, nodes, prev_allocations, node_template)
             if desired_nodes < len(nodes):
